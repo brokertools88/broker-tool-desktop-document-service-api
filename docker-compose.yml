@@ -1,0 +1,119 @@
+version: '3.8'
+
+services:
+  # Document Service API
+  document-api:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      - DATABASE_URL=postgresql://docuser:docpass@postgres:5432/document_service
+      - REDIS_URL=redis://redis:6379/0
+      - AUTH_SERVICE_URL=${AUTH_SERVICE_URL:-http://auth-service:8000}
+      - AUTH_SERVICE_TIMEOUT=30
+      - AUTH_SERVICE_RETRIES=3
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+      - AWS_REGION=us-east-1
+      - S3_BUCKET_NAME=${S3_BUCKET_NAME}
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY}
+      - MISTRAL_API_KEY=${MISTRAL_API_KEY}
+      - ENVIRONMENT=development
+    depends_on:
+      - postgres
+      - redis
+    volumes:
+      - ./app:/app/app
+      - ./logs:/app/logs
+    networks:
+      - document-network
+
+  # PostgreSQL Database
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      - POSTGRES_DB=document_service
+      - POSTGRES_USER=docuser
+      - POSTGRES_PASSWORD=docpass
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./docker/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql
+    networks:
+      - document-network
+
+  # Redis Cache
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - document-network
+
+  # Nginx Load Balancer (optional for production)
+  nginx:
+    image: nginx:alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./docker/nginx/nginx.conf:/etc/nginx/nginx.conf
+      - ./docker/nginx/ssl:/etc/nginx/ssl
+    depends_on:
+      - document-api
+    networks:
+      - document-network
+    profiles:
+      - production
+
+  # Monitoring with Prometheus (optional)
+  prometheus:
+    image: prom/prometheus:latest
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./docker/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    networks:
+      - document-network
+    profiles:
+      - monitoring
+
+  # Grafana for metrics visualization (optional)
+  grafana:
+    image: grafana/grafana:latest
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./docker/grafana/dashboards:/etc/grafana/provisioning/dashboards
+    networks:
+      - document-network
+    profiles:
+      - monitoring
+
+volumes:
+  postgres_data:
+  redis_data:
+  prometheus_data:
+  grafana_data:
+
+networks:
+  document-network:
+    driver: bridge
+
+# TODO: Add environment-specific compose files (dev, staging, prod)
+# TODO: Implement proper secrets management
+# TODO: Add backup and restore procedures
+# TODO: Configure SSL/TLS for production
+# TODO: Add log aggregation (ELK stack)
+# TODO: Add container security scanning
+# TODO: Implement health checks for all services
+# TODO: Add resource limits and scaling configuration
+# TODO: Add auth-service container or external service configuration
+# NOTE: This compose file assumes auth-service is running externally or in another compose stack

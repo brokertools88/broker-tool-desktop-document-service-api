@@ -45,6 +45,10 @@ class ErrorType(str, Enum):
     INTERNAL_SERVER_ERROR = "https://insurecove.com/problems/internal-server-error"
     SERVICE_UNAVAILABLE = "https://insurecove.com/problems/service-unavailable"
     EXTERNAL_SERVICE_ERROR = "https://insurecove.com/problems/external-service-error"
+    
+    # Configuration and secrets errors
+    CONFIGURATION_ERROR = "https://insurecove.com/problems/configuration-error"
+    SECRETS_MANAGER_ERROR = "https://insurecove.com/problems/secrets-manager-error"
 
 
 class APIException(Exception):
@@ -398,6 +402,32 @@ class ExternalServiceError(APIException):
             detail=f"{service_name}: {detail}",
             type_uri=ErrorType.EXTERNAL_SERVICE_ERROR,
             service_name=service_name,
+            **kwargs
+        )
+
+
+class ConfigurationError(APIException):
+    """Configuration or secrets management error"""
+    
+    def __init__(self, detail: str = "Configuration error", **kwargs):
+        super().__init__(
+            status_code=500,
+            title="Configuration Error",
+            detail=detail,
+            type_uri=ErrorType.CONFIGURATION_ERROR,
+            **kwargs
+        )
+
+
+class SecretsManagerError(APIException):
+    """AWS Secrets Manager error"""
+    
+    def __init__(self, detail: str = "Secrets Manager error", **kwargs):
+        super().__init__(
+            status_code=500,
+            title="Secrets Manager Error",
+            detail=detail,
+            type_uri=ErrorType.SECRETS_MANAGER_ERROR,
             **kwargs
         )
 

@@ -6,7 +6,7 @@ This module provides common test configuration, fixtures, and utilities.
 
 import pytest
 import asyncio
-from typing import Generator, AsyncGenerator
+from typing import Generator, AsyncGenerator, Dict, List, Any
 from unittest.mock import Mock, AsyncMock
 from fastapi.testclient import TestClient
 import tempfile
@@ -17,7 +17,7 @@ from app.core.config import settings
 
 
 @pytest.fixture(scope="session")
-def event_loop():
+def event_loop() -> Generator[asyncio.AbstractEventLoop, None, None]:
     """
     Create event loop for async tests.
     
@@ -31,7 +31,7 @@ def event_loop():
 
 
 @pytest.fixture
-def test_client() -> TestClient:
+def test_client() -> Generator[TestClient, None, None]:
     """
     Create test client for FastAPI app.
     
@@ -45,7 +45,7 @@ def test_client() -> TestClient:
 
 
 @pytest.fixture
-def test_settings():
+def test_settings() -> object:
     """
     Provide test configuration settings.
     
@@ -64,7 +64,7 @@ def test_settings():
 
 
 @pytest.fixture
-def mock_storage_service():
+def mock_storage_service() -> AsyncMock:
     """
     Mock storage service for testing.
     
@@ -85,7 +85,7 @@ def mock_storage_service():
 
 
 @pytest.fixture
-def mock_ocr_service():
+def mock_ocr_service() -> AsyncMock:
     """
     Mock OCR service for testing.
     
@@ -106,7 +106,7 @@ def mock_ocr_service():
 
 
 @pytest.fixture
-def mock_auth_service():
+def mock_auth_service() -> AsyncMock:
     """
     Mock authentication service for testing.
     
@@ -126,7 +126,7 @@ def mock_auth_service():
 
 
 @pytest.fixture
-def sample_pdf_content():
+def sample_pdf_content() -> bytes:
     """
     Provide sample PDF content for testing.
     
@@ -140,7 +140,7 @@ def sample_pdf_content():
 
 
 @pytest.fixture
-def sample_image_content():
+def sample_image_content() -> bytes:
     """
     Provide sample image content for testing.
     
@@ -154,7 +154,7 @@ def sample_image_content():
 
 
 @pytest.fixture
-def temp_file():
+def temp_file() -> Generator[str, None, None]:
     """
     Create temporary file for testing.
     
@@ -175,7 +175,7 @@ def temp_file():
 
 
 @pytest.fixture
-def test_user_data():
+def test_user_data() -> dict[str, object]:
     """
     Provide test user data.
     
@@ -195,7 +195,7 @@ def test_user_data():
 
 
 @pytest.fixture
-def test_document_data():
+def test_document_data() -> dict[str, object]:
     """
     Provide test document data.
     
@@ -228,16 +228,16 @@ class MockDatabase:
     - Implement query simulation
     """
     
-    def __init__(self):
-        self.data = {}
+    def __init__(self) -> None:
+        self.data: Dict[str, List[Dict[str, Any]]] = {}
     
-    async def save(self, table: str, data: dict):
+    async def save(self, table: str, data: Dict[str, Any]) -> None:
         """Save data to mock table."""
         if table not in self.data:
             self.data[table] = []
         self.data[table].append(data)
     
-    async def find(self, table: str, query: dict):
+    async def find(self, table: str, query: Dict[str, Any]) -> List[Dict[str, Any]]:
         """Find data in mock table."""
         if table not in self.data:
             return []
@@ -247,7 +247,7 @@ class MockDatabase:
 
 
 @pytest.fixture
-def mock_database():
+def mock_database() -> MockDatabase:
     """Provide mock database instance."""
     return MockDatabase()
 
@@ -263,14 +263,14 @@ class TestHelpers:
     """
     
     @staticmethod
-    def create_test_file(content: bytes, filename: str = "test.txt"):
+    def create_test_file(content: bytes, filename: str = "test.txt") -> str:
         """Create test file with content."""
         with tempfile.NamedTemporaryFile(delete=False, suffix=filename) as tmp:
             tmp.write(content)
             return tmp.name
     
     @staticmethod
-    def assert_response_format(response_data: dict):
+    def assert_response_format(response_data: Dict[str, Any]) -> None:
         """Assert standard response format."""
         assert "success" in response_data
         assert "message" in response_data
@@ -280,7 +280,7 @@ class TestHelpers:
 
 # Performance testing fixtures
 @pytest.fixture
-def performance_test_data():
+def performance_test_data() -> Dict[str, Any]:
     """
     Provide data for performance testing.
     
@@ -298,7 +298,7 @@ def performance_test_data():
 
 # Security testing fixtures
 @pytest.fixture
-def security_test_data():
+def security_test_data() -> Dict[str, List[str]]:
     """
     Provide data for security testing.
     

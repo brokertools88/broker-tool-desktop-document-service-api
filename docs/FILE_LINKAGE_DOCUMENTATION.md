@@ -2,7 +2,49 @@
 
 ## 📋 **Overview**
 
-This document provides a comprehensive guide to each Python file in the document service, their purposes, dependencies, and how they link together to form a cohesive document processing and management system.
+This document provides a comprehensive guide to each Python file in the document service, their purposes, dependencies, and how they link together to## 🔐 **Service Layer**
+
+### **📄 `app/services/secrets_service.py`** - AWS Secrets Manager Service ⭐**NEW**
+
+**Purpose**: Centralized secrets management for the document service, providing application-specific secret retrieval and validation.
+
+**Key Functions**:
+- Document service specific secret retrieval
+- Secret validation and caching
+- Environment-aware secret management
+- Health checks for secret availability
+
+**Key Methods**:
+- `get_mistral_ai_config()` - Mistral AI API configuration
+- `get_storage_config()` - AWS S3 storage configuration  
+- `get_auth_service_config()` - External auth service credentials
+- `get_jwt_config()` - JWT validation configuration
+- `get_database_config()` - Database connection details
+- `get_monitoring_config()` - Monitoring and logging settings
+
+**Dependencies**:
+```python
+from app.utils.aws_secrets import AWSSecretsManager, AWSSecretsConfig, SecretValue
+from app.core.exceptions import ConfigurationError
+from typing import Dict, Any, Optional
+import logging
+import asyncio
+```
+
+**Links to**:
+- `app/utils/aws_secrets.py` (core AWS Secrets Manager client)
+- `app/core/exceptions.py` (for configuration errors)
+- `app/core/secrets_config.py` (configuration integration)
+
+**Used by**:
+- `app/core/secrets_config.py` (for configuration loading)
+- `app/main.py` (for application startup)
+- Health check endpoints
+- All modules requiring secure configuration
+
+---
+
+### **📄 `app/services/auth_client_service.py`** - Authentication Clientrm a cohesive document processing and management system.
 
 ---
 
@@ -70,11 +112,43 @@ import os
 
 **Links to**:
 - `app/core/storage.py` (for AWS S3 configuration)
+- `app/core/secrets_config.py` (for secrets-based configuration)
 - All other modules (for configuration access)
 
 **Used by**:
 - Every module that needs configuration
 - `get_settings()` dependency injection
+
+---
+
+### **📄 `app/core/secrets_config.py`** - AWS Secrets Manager Configuration ⭐**NEW**
+
+**Purpose**: Secrets-based configuration management that integrates with AWS Secrets Manager for sensitive settings.
+
+**Key Classes**:
+- `SecretsBasedConfig`: Configuration class using AWS Secrets Manager
+- Environment-aware secret loading
+- Property-based access to secrets
+- Automatic fallback to environment variables for non-sensitive settings
+
+**Dependencies**:
+```python
+from app.services.secrets_service import get_secrets_manager
+from app.core.exceptions import ConfigurationError
+from typing import Dict, Any, Optional, List
+import os
+import logging
+```
+
+**Links to**:
+- `app/services/secrets_service.py` (for secret retrieval)
+- `app/core/exceptions.py` (for configuration errors)
+- `app/utils/aws_secrets.py` (underlying AWS client)
+
+**Used by**:
+- `app/main.py` (for application startup configuration)
+- All modules requiring secure configuration
+- Health check endpoints
 
 ---
 
@@ -85,6 +159,7 @@ import os
 **Key Classes**:
 - `BaseInsureCoveException`: Base exception class
 - `ValidationException`, `AuthenticationException`, etc.
+- `ConfigurationError`: AWS Secrets Manager configuration errors ⭐**UPDATED**
 - `ProblemDetails`: RFC 9457 error response model
 - Exception handlers for FastAPI
 
@@ -99,11 +174,13 @@ from typing import Dict, List, Optional, Any
 **Links to**:
 - `app/models.py` (for error response models)
 - `app/core/logging_config.py` (for error logging)
+- `app/services/secrets_service.py` (for secret management errors)
 
 **Used by**:
 - All route modules for error handling
 - `app/main.py` for exception handler registration
 - All service modules for raising specific errors
+- AWS Secrets Manager integration modules
 
 ---
 
@@ -354,6 +431,45 @@ from app.utils.file_utils import get_file_info
 
 ## 🛠️ **Utility Modules**
 
+### **📄 `app/utils/aws_secrets.py`** - AWS Secrets Manager Client ⭐**NEW**
+
+**Purpose**: Core AWS Secrets Manager client providing low-level secret retrieval, caching, and error handling for the document service.
+
+**Key Classes**:
+- `AWSSecretsManager`: Main secrets manager client
+- `AWSSecretsConfig`: Configuration for AWS Secrets Manager
+- `SecretValue`: Container for secret values with metadata
+
+**Key Functions**:
+- Document service specific secret retrieval methods
+- Connection management and proxy support
+- Intelligent caching with TTL
+- Error handling and retry logic
+- Environment-aware secret naming
+
+**Dependencies**:
+```python
+import boto3
+from botocore.exceptions import ClientError, NoCredentialsError
+from pydantic import BaseModel, Field
+from typing import Dict, Any, Optional, Union
+from functools import lru_cache
+import json
+import logging
+```
+
+**Links to**:
+- `app/services/secrets_service.py` (high-level secrets management)
+- AWS Secrets Manager service
+- `app/core/exceptions.py` (for AWS-related errors)
+
+**Used by**:
+- `app/services/secrets_service.py` (primary consumer)
+- `app/core/secrets_config.py` (configuration integration)
+- Health check endpoints
+
+---
+
 ### **📄 `app/utils/crypto_utils.py`** - Cryptographic Utilities
 
 **Purpose**: Cryptographic operations for file encryption, hashing, and security.
@@ -524,37 +640,117 @@ from app.models import OCRRequest, OCRResponse
 
 ---
 
+### **📄 `app/api/health_routes.py`** - Health Check Endpoints ⭐**UPDATED**
+
+**Purpose**: Comprehensive health monitoring endpoints with AWS Secrets Manager integration.
+
+**Key Endpoints**:
+- `GET /health` - Basic health check
+- `GET /health/live` - Liveness probe
+- `GET /health/ready` - Readiness probe  
+- `GET /health/startup` - Startup probe
+- `GET /health/detailed` - Detailed health with dependencies
+
+**Health Checks Include**:
+- AWS Secrets Manager connectivity
+- AWS S3 storage availability
+- Mistral AI OCR service status
+- External auth service connectivity
+- Application configuration validation
+
+**Dependencies**:
+```python
+from fastapi import APIRouter, Depends, HTTPException
+from app.services.secrets_service import health_check_secrets
+from app.models import HealthCheckResponse, ServiceHealthCheck
+from app.core.exceptions import ConfigurationError
+```
+
+**Links to**:
+- `app/services/secrets_service.py` (for secrets health checks)
+- `app/models.py` (for health check models)
+- `app/core/exceptions.py` (for error handling)
+- AWS services (S3, Secrets Manager)
+- External services (Mistral AI, Auth service)
+
+**Used by**:
+- `app/main.py` (route registration)
+- Kubernetes health probes
+- Monitoring systems
+- Load balancers
+
+---
+
+### **📄 `app/api/metrics_routes.py`** - Metrics and Monitoring Endpoints
+
+**Purpose**: Application metrics and performance monitoring endpoints.
+
+**Key Endpoints**:
+- `GET /metrics` - Prometheus metrics
+- `GET /metrics/custom` - Custom application metrics
+
+**Dependencies**:
+```python
+from fastapi import APIRouter
+from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
+```
+
+**Links to**:
+- Prometheus metrics library
+- Application performance monitoring
+
+**Used by**:
+- `app/main.py` (route registration)
+- Prometheus monitoring
+- Grafana dashboards
+
+---
+
 ## 🎯 **Key Integration Points**
 
 ### **1. Configuration Flow**
 ```
 Environment Variables → app/core/config.py → All Modules
+AWS Secrets Manager → app/utils/aws_secrets.py → app/services/secrets_service.py → app/core/secrets_config.py → All Modules ⭐**NEW**
 AWS S3 Configuration → app/core/storage.py → Storage Operations
 ```
 
-### **2. Authentication Flow**
+### **2. Secrets Management Flow** ⭐**NEW**
 ```
-API Request → Route Handlers → app/services/auth_client_service.py → External Auth Service
+Application Startup → app/services/secrets_service.py → AWS Secrets Manager → Cached Secrets → Configuration
+Health Checks → Secrets Validation → AWS Connectivity → Status Reports
 ```
 
-### **3. Document Processing Flow**
+### **3. Authentication Flow**
+```
+API Request → Route Handlers → app/services/auth_client_service.py → External Auth Service
+JWT Validation → app/core/secrets_config.py → AWS Secrets (JWT Config) → Token Verification ⭐**UPDATED**
+```
+
+### **4. Document Processing Flow**
 ```
 Upload Request → app/api/document_routes.py → app/services/document_service.py → Storage/Validation
 ```
 
-### **4. OCR Processing Flow**
+### **5. OCR Processing Flow**
 ```
-OCR Request → app/api/ocr_routes.py → app/services/ocr_service.py → AWS Textract → Results
+OCR Request → app/api/ocr_routes.py → app/services/ocr_service.py → Mistral AI OCR → Results ⭐**UPDATED**
 ```
 
-### **5. Error Handling Flow**
+### **6. Error Handling Flow**
 ```
 Exception → app/core/exceptions.py → Structured Response → Client
+Configuration Errors → ConfigurationError → Secrets Manager Issues → Health Status ⭐**NEW**
 ```
 
-### **6. Logging Flow**
+### **7. Logging Flow**
 ```
 All Modules → app/core/logging_config.py → Structured Logs → CloudWatch
+```
+
+### **8. Health Monitoring Flow** ⭐**NEW**
+```
+Health Endpoint → app/api/health_routes.py → Service Health Checks → AWS Services → Status Response
 ```
 
 ---
@@ -564,23 +760,28 @@ All Modules → app/core/logging_config.py → Structured Logs → CloudWatch
 | Module | Purpose | Key Dependencies | Used By |
 |--------|---------|------------------|---------|
 | `main.py` | FastAPI app entry point | All core, API, service modules | ASGI server |
-| `core/config.py` | Configuration management | `core/storage.py` | All modules |
+| `core/config.py` | Configuration management | `core/storage.py`, `core/secrets_config.py` | All modules |
+| `core/secrets_config.py` ⭐**NEW** | AWS Secrets Manager configuration | `services/secrets_service.py`, `utils/aws_secrets.py` | All modules needing secure config |
 | `core/exceptions.py` | Error handling | `models.py` | All modules |
 | `core/security.py` | Security & auth integration | `config.py`, `auth_client_service.py` | API routes |
 | `core/logging_config.py` | Logging setup | None | All modules |
 | `core/storage.py` | AWS S3 configuration | `config.py` | Storage service |
 | `models.py` | API models | None | API routes, services |
+| `services/secrets_service.py` ⭐**NEW** | Document service secrets management | `utils/aws_secrets.py`, `core/exceptions.py` | `core/secrets_config.py`, health checks |
 | `services/auth_client_service.py` | Auth service client | `config.py`, `security.py` | API routes |
 | `services/document_service.py` | Document processing | Storage, validation services | Document routes |
 | `services/ocr_service.py` | OCR processing | `config.py`, storage service | OCR routes |
 | `services/storage_service.py` | File storage operations | `config.py`, `storage.py` | Document/OCR services |
 | `services/validation_service.py` | File validation | `config.py`, `file_utils.py` | Document service |
+| `utils/aws_secrets.py` ⭐**NEW** | AWS Secrets Manager client | `boto3`, `botocore` | `services/secrets_service.py` |
 | `utils/crypto_utils.py` | Cryptographic operations | `config.py` | Document service |
 | `utils/date_utils.py` | Date/time utilities | None | All modules |
 | `utils/file_utils.py` | File operations | None | Validation service |
 | `utils/response_utils.py` | Response formatting | `models.py` | API routes |
 | `api/document_routes.py` | Document endpoints | Document service, auth client | `main.py` |
 | `api/ocr_routes.py` | OCR endpoints | OCR service, auth client | `main.py` |
+| `api/health_routes.py` ⭐**UPDATED** | Health check endpoints | `services/secrets_service.py`, `models.py` | `main.py`, monitoring |
+| `api/metrics_routes.py` | Metrics endpoints | Prometheus client | `main.py`, monitoring |
 
 ---
 
@@ -590,6 +791,10 @@ All Modules → app/core/logging_config.py → Structured Logs → CloudWatch
 ```python
 # Core utilities - use from app.core
 from app.core import get_settings, get_logger
+
+# Secrets management - use secrets-based configuration ⭐**NEW**
+from app.core.secrets_config import get_config, initialize_config
+from app.services.secrets_service import get_secrets_manager
 
 # Service operations - use service layer
 from app.services.document_service import DocumentService
@@ -601,19 +806,42 @@ from app.models import DocumentResponse, OCRRequest
 
 ### **2. Configuration Access**
 ```python
-# Always use dependency injection
+# Traditional configuration access
 def some_function(settings: Settings = Depends(get_settings)):
     return settings.aws_s3_bucket
+
+# AWS Secrets Manager configuration access ⭐**NEW**
+from app.core.secrets_config import get_config
+config = get_config()
+api_key = config.mistral_api_key  # Retrieved from AWS Secrets Manager
 ```
 
-### **3. Error Handling**
+### **3. Secrets Management** ⭐**NEW**
+```python
+# Application startup - initialize secrets
+await initialize_secrets(environment="production")
+config = await initialize_config(environment="production")
+
+# Direct secret access when needed
+from app.services.secrets_service import get_secrets_manager
+secrets = get_secrets_manager()
+mistral_config = await secrets.get_mistral_ai_config()
+```
+
+### **4. Error Handling**
 ```python
 # Use specific exception types
-from app.core.exceptions import ValidationException, StorageException
+from app.core.exceptions import ValidationException, StorageException, ConfigurationError
 raise ValidationException("Invalid file format")
+
+# Handle configuration errors ⭐**NEW**
+try:
+    config = await secrets.get_mistral_ai_config()
+except ConfigurationError as e:
+    logger.error(f"Failed to load Mistral AI configuration: {e}")
 ```
 
-### **4. Authentication**
+### **5. Authentication**
 ```python
 # Use auth client service for token validation
 from app.services.auth_client_service import AuthClientService
@@ -621,15 +849,26 @@ auth_service = AuthClientService()
 user = await auth_service.validate_token(token)
 ```
 
-### **5. Logging**
+### **6. Logging**
 ```python
 # Use structured logging
 from app.core.logging_config import get_logger
 logger = get_logger(__name__)
 logger.info("Document processed", extra={"document_id": doc_id, "user_id": user_id})
+
+# Log secrets-related events ⭐**NEW**
+logger.info("AWS Secrets Manager initialized", extra={"environment": env, "region": region})
+```
+
+### **7. Health Checks** ⭐**NEW**
+```python
+# Include secrets in health checks
+from app.services.secrets_service import health_check_secrets
+secrets_health = await health_check_secrets()
+overall_health = secrets_health["status"] == "healthy"
 ```
 
 ---
 
 **Last Updated**: July 8, 2025  
-**Documentation Version**: 2.0.0
+**Documentation Version**: 3.0.0 ⭐**UPDATED for AWS Secrets Manager Integration**

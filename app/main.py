@@ -4,6 +4,8 @@ FastAPI Document Service - Main Application Entry Point
 This module initializes the FastAPI application with all necessary middleware,
 route handlers, and configuration for the InsureCove Document Service.
 
+Uses AWS Secrets Manager for sensitive configuration instead of .env files.
+
 Author: InsureCove Team
 Date: July 8, 2025
 """
@@ -14,18 +16,18 @@ from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import JSONResponse
 import uvicorn
 import uuid
+import logging
 from contextlib import asynccontextmanager
 
-# TODO: Import route modules
+# Import route modules
 from app.api import document_routes, ocr_routes, health_routes, metrics_routes
 
-# TODO: Import core modules
-# from app.core.config import settings
-# from app.core.exceptions import APIException
-# from app.core.logging_config import setup_logging
+# Import AWS Secrets Manager configuration
+from app.core.secrets_config import get_config, initialize_config
+from app.services.secrets_service import initialize_secrets
 
-# TODO: Import auth client service
-# from app.services.auth_client_service import AuthClientService
+# Import core modules
+from app.core.exceptions import ConfigurationError
 
 
 @asynccontextmanager

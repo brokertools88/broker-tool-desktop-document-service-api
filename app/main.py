@@ -17,7 +17,7 @@ import uuid
 from contextlib import asynccontextmanager
 
 # TODO: Import route modules
-# from app.api import document_routes, ocr_routes, health_routes, metrics_routes
+from app.api import document_routes, ocr_routes, health_routes, metrics_routes
 
 # TODO: Import core modules
 # from app.core.config import settings
@@ -168,19 +168,19 @@ def setup_routes(app: FastAPI):
     #     tags=["ocr"]
     # )
     
-    # TODO: Include health check routes
-    # app.include_router(
-    #     health_routes.router,
-    #     prefix="/health",
-    #     tags=["health"]
-    # )
+    # Include health check routes
+    app.include_router(
+        health_routes.router,
+        prefix="/health",
+        tags=["health"]
+    )
     
-    # TODO: Include metrics routes
-    # app.include_router(
-    #     metrics_routes.router,
-    #     prefix="/metrics",
-    #     tags=["metrics"]
-    # )
+    # Include metrics routes
+    app.include_router(
+        metrics_routes.router,
+        prefix="/metrics",
+        tags=["metrics"]
+    )
     
     # TODO: Add root endpoint
     @app.get("/", tags=["root"])

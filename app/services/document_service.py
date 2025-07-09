@@ -14,25 +14,26 @@ from datetime import datetime, timedelta
 from pathlib import Path
 import asyncio
 
-# TODO: Import models
-# from app.models import (
-#     DocumentResponse, DocumentUploadRequest, DocumentUpdateRequest,
-#     DocumentListResponse, DocumentFilters
-# )
+from app.models import (
+    DocumentResponse, DocumentUploadRequest, DocumentUpdateRequest,
+    DocumentListResponse, DocumentFilters, DocumentType, DocumentStatus
+)
 
-# TODO: Import core utilities
-# from app.core.exceptions import (
-#     DocumentNotFoundError, ValidationError, StorageError,
-#     DocumentProcessingError, AuthorizationError
-# )
-# from app.core.storage import StorageManager
-# from app.core.logging_config import get_logger
+from app.core.exceptions import (
+    DocumentNotFoundError, ValidationError, StorageError,
+    DocumentProcessingError, AuthorizationError
+)
+from app.core.storage import StorageManager
+from app.core.logging_config import get_logger
 
-# TODO: Import services
-# from app.services.storage_service import StorageService
-# from app.services.validation_service import ValidationService
-# from app.services.ocr_service import MistralOCRService
-# from app.services.auth_client_service import AuthClientService
+from app.services.storage_service import StorageService
+from app.services.validation_service import ValidationService
+from app.services.ocr_service import OCRService
+from app.services.auth_client_service import AuthClientService
+from app.utils.file_utils import FileProcessor
+from app.utils.crypto_utils import SecureStorage, TokenGenerator
+from app.utils.date_utils import DateTimeHelper
+from app.utils.response_utils import ResponseBuilder, APIResponseFormatter
 
 
 class DocumentService:
@@ -40,22 +41,26 @@ class DocumentService:
     
     def __init__(
         self,
-        # storage_service: StorageService,
-        # validation_service: ValidationService,
-        # ocr_service: MistralOCRService,
-        # database_session=None
+        storage_service: Optional[StorageService] = None,
+        validation_service: Optional[ValidationService] = None,
+        ocr_service: Optional[OCRService] = None,
+        auth_service: Optional[AuthClientService] = None,
+        database_session=None
     ):
-        # self.storage = storage_service
-        # self.validator = validation_service
-        # self.ocr = ocr_service
-        # self.db = database_session
-        # self.logger = get_logger(__name__)
+        """Initialize document service with dependencies"""
+        self.storage = storage_service
+        self.validator = validation_service
+        self.ocr = ocr_service
+        self.auth = auth_service
+        self.db = database_session
+        self.logger = get_logger(__name__)
         
-        # Placeholder initialization
-        self.storage = None
-        self.validator = None
-        self.ocr = None
-        self.db = None
+        # Initialize utility classes
+        self.file_processor = FileProcessor()
+        self.secure_storage = SecureStorage()
+        self.token_generator = TokenGenerator()
+        self.datetime_helper = DateTimeHelper()
+        self.response_builder = ResponseBuilder()
         
         # Document processing statistics
         self._stats = {
@@ -94,80 +99,122 @@ class DocumentService:
             Document response with metadata and URLs
         """
         
-        # TODO: Implement document upload logic
-        # TODO: Validate file content and metadata
-        # TODO: Check user quotas and permissions
-        # TODO: Generate unique document ID
-        # TODO: Store file in storage backend
-        # TODO: Save document metadata to database
-        # TODO: Trigger OCR if requested
-        # TODO: Generate response with URLs
-        
+        # Generate unique document ID
         document_id = str(uuid.uuid4())
         
         try:
-            # Validate file
-            # validation_result = await self.validator.validate_file(
-            #     file_content, filename, content_type
-            # )
+            # Validate file content and metadata
+            validation_result = await self._validate_upload_file(file_content, filename, content_type)
+            if not validation_result.get("is_valid", False):
+                raise ValidationError(f"File validation failed: {validation_result.get('errors', [])}")
             
-            # Store file
-            # storage_result = await self.storage.store_file(
-            #     file_content, filename, user_id, metadata
-            # )
+            # Check user quotas and permissions
+            if self.auth:
+                # TODO: Implement proper user permission checking
+                user_permissions = {"can_upload": True, "storage_quota_mb": 1000}
+                if not user_permissions.get("can_upload", False):
+                    raise AuthorizationError("User does not have upload permissions")
+                
+                # Check storage quota
+                current_usage = await self._get_user_storage_usage(user_id)
+                file_size = len(file_content)
+                quota_limit = user_permissions.get("storage_quota_mb", 1000) * 1024 * 1024
+                
+                if current_usage + file_size > quota_limit:
+                    raise StorageError("Storage quota exceeded")
             
-            # Save metadata
-            # document_record = await self._save_document_metadata(
-            #     document_id, filename, user_id, storage_result, tags
-            # )
+            # Store file in storage backend
+            storage_result = None
+            if self.storage:
+                storage_result = await self.storage.upload_file(
+                    file_content=file_content,
+                    filename=filename,
+                    content_type=content_type or "application/octet-stream",
+                    user_id=user_id,
+                    metadata=metadata or {}
+                )
+            
+            # Save document metadata to database
+            document_record = await self._save_document_metadata(
+                document_id=document_id,
+                filename=filename,
+                user_id=user_id,
+                storage_result=storage_result,
+                tags=tags or [],
+                content_type=content_type,
+                file_size=len(file_content),
+                metadata=metadata or {}
+            )
             
             # Trigger OCR if requested
-            # if auto_ocr:
-            #     await self.ocr.process_document_async(document_id)
+            ocr_job_id = None
+            if auto_ocr and self.ocr:
+                try:
+                    ocr_result = await self.ocr.extract_text(file_content, filename)
+                    ocr_job_id = ocr_result.get("job_id", str(uuid.uuid4()))
+                except Exception as ocr_error:
+                    self.logger.warning(f"OCR processing failed for document {document_id}: {str(ocr_error)}")
+            
+            # Generate response with URLs
+            upload_url = None
+            download_url = None
+            
+            if storage_result:
+                upload_url = storage_result.get("upload_url")
+                download_url = await self._generate_signed_download_url(document_id, user_id)
             
             # Update statistics
             self._stats["total_uploads"] += 1
             
-            # TODO: Log upload event
-            # self.logger.info(
-            #     "Document uploaded successfully",
-            #     extra={
-            #         "document_id": document_id,
-            #         "user_id": user_id,
-            #         "filename": filename,
-            #         "file_size": len(file_content)
-            #     }
-            # )
+            # Log upload event
+            self.logger.info(
+                "Document uploaded successfully",
+                extra={
+                    "document_id": document_id,
+                    "user_id": user_id,
+                    "filename": filename,
+                    "file_size": len(file_content),
+                    "auto_ocr": auto_ocr,
+                    "ocr_job_id": ocr_job_id
+                }
+            )
             
             return {
                 "id": document_id,
                 "filename": filename,
                 "original_filename": filename,
                 "user_id": user_id,
-                "status": "uploaded",
+                "status": DocumentStatus.UPLOADED.value,
                 "file_size": len(file_content),
-                "content_type": content_type,
+                "content_type": content_type or "application/octet-stream",
                 "tags": tags or [],
                 "metadata": metadata or {},
                 "created_at": datetime.utcnow(),
                 "updated_at": datetime.utcnow(),
                 "auto_ocr": auto_ocr,
-                "upload_url": None,  # TODO: Generate upload URL
-                "download_url": None,  # TODO: Generate download URL
-                "etag": f'"{datetime.utcnow().timestamp()}"'
+                "upload_url": upload_url,
+                "download_url": download_url,
+                "etag": f'"{hash(file_content)}"',  # Simple hash for etag
+                "version": 1,
+                "ocr_completed": False,
+                "ocr_job_id": ocr_job_id
             }
             
+        except (ValidationError, AuthorizationError, StorageError) as e:
+            self._stats["processing_errors"] += 1
+            self.logger.error(f"Document upload failed: {str(e)}", extra={"document_id": document_id})
+            raise
         except Exception as e:
             self._stats["processing_errors"] += 1
-            # TODO: Log error and convert to appropriate exception
-            raise Exception(f"Document upload failed: {str(e)}")
+            self.logger.error(f"Unexpected error during document upload: {str(e)}", extra={"document_id": document_id})
+            raise DocumentProcessingError(f"Document upload failed: {str(e)}")
     
     async def upload_documents_batch(
         self,
         files: List[Dict[str, Any]],
         user_id: str,
         auto_ocr: bool = True
-    ) -> List[Dict[str, Any]]:
+    ) -> Dict[str, Any]:
         """
         Upload multiple documents in batch
         
@@ -180,15 +227,23 @@ class DocumentService:
             List of document responses
         """
         
-        # TODO: Implement batch upload logic
-        # TODO: Validate all files before processing
-        # TODO: Process uploads in parallel
-        # TODO: Handle partial failures gracefully
-        # TODO: Return batch results
+        # Validate all files before processing
+        validation_errors = []
+        for i, file_data in enumerate(files):
+            try:
+                if not file_data.get("content"):
+                    validation_errors.append(f"File {i}: Missing content")
+                if not file_data.get("filename"):
+                    validation_errors.append(f"File {i}: Missing filename")
+                if len(file_data.get("content", b"")) > 100 * 1024 * 1024:  # 100MB limit
+                    validation_errors.append(f"File {i}: File too large")
+            except Exception as e:
+                validation_errors.append(f"File {i}: Validation error - {str(e)}")
         
-        results = []
+        if validation_errors:
+            raise ValidationError(f"Batch validation failed: {'; '.join(validation_errors)}")
         
-        # Process files in parallel
+        # Process uploads in parallel
         upload_tasks = [
             self.upload_document(
                 file_data["content"],
@@ -203,34 +258,63 @@ class DocumentService:
         ]
         
         try:
+            # Handle partial failures gracefully
             results = await asyncio.gather(*upload_tasks, return_exceptions=True)
             
-            # Process results and handle exceptions
+            # Return batch results
             processed_results = []
+            success_count = 0
+            error_count = 0
+            
             for i, result in enumerate(results):
                 if isinstance(result, Exception):
+                    error_count += 1
                     processed_results.append({
                         "error": str(result),
                         "filename": files[i]["filename"],
-                        "success": False
+                        "success": False,
+                        "error_type": type(result).__name__
                     })
+                    self.logger.error(f"Batch upload failed for file {files[i]['filename']}: {str(result)}")
                 elif isinstance(result, dict):
+                    success_count += 1
                     processed_results.append({
                         **result,
                         "success": True
                     })
                 else:
-                    # Handle unexpected result type
+                    error_count += 1
                     processed_results.append({
                         "error": f"Unexpected result type: {type(result)}",
                         "filename": files[i]["filename"],
-                        "success": False
+                        "success": False,
+                        "error_type": "UnexpectedResultType"
                     })
             
-            return processed_results
+            # Log batch upload summary
+            self.logger.info(
+                f"Batch upload completed: {success_count} successful, {error_count} failed",
+                extra={
+                    "user_id": user_id,
+                    "total_files": len(files),
+                    "success_count": success_count,
+                    "error_count": error_count
+                }
+            )
+            
+            return {
+                "batch_id": str(uuid.uuid4()),
+                "total_files": len(files),
+                "successful": success_count,
+                "failed": error_count,
+                "results": processed_results,
+                "completed_at": datetime.utcnow()
+            }
             
         except Exception as e:
-            # TODO: Log batch upload error
+            # Log batch upload error
+            self.logger.error(f"Batch upload failed: {str(e)}", extra={"user_id": user_id})
+            raise DocumentProcessingError(f"Batch upload failed: {str(e)}")
             raise Exception(f"Batch upload failed: {str(e)}")
     
     # ============= DOCUMENT RETRIEVAL OPERATIONS =============
@@ -552,7 +636,7 @@ class DocumentService:
             "storage_used_percent": 0.0
         }
     
-    # ============= PRIVATE HELPER METHODS =============
+    # ============= HELPER METHODS =============
     
     async def _check_document_access(self, document_id: str, user_id: str) -> bool:
         """Check if user has access to document"""
@@ -564,36 +648,93 @@ class DocumentService:
         # TODO: Implement database query
         return {}  # Placeholder
     
+    async def _get_user_storage_usage(self, user_id: str) -> int:
+        """Get current storage usage for user in bytes"""
+        # TODO: Implement database query to calculate user storage usage
+        if self.db:
+            # Placeholder for database query
+            # result = await self.db.execute(
+            #     "SELECT SUM(file_size) FROM documents WHERE user_id = ?", user_id
+            # )
+            # return result.scalar() or 0
+            pass
+        return 0  # Default for now
+    
     async def _save_document_metadata(
         self,
         document_id: str,
         filename: str,
         user_id: str,
-        storage_result: Dict[str, Any],
-        tags: Optional[List[str]]
+        storage_result: Optional[Dict[str, Any]],
+        tags: List[str],
+        content_type: Optional[str],
+        file_size: int,
+        metadata: Dict[str, Any]
     ) -> Dict[str, Any]:
         """Save document metadata to database"""
-        # TODO: Implement database insert
-        return {}  # Placeholder
+        document_record = {
+            "id": document_id,
+            "filename": filename,
+            "original_filename": filename,
+            "user_id": user_id,
+            "status": DocumentStatus.UPLOADED.value,
+            "file_size": file_size,
+            "content_type": content_type or "application/octet-stream",
+            "tags": tags,
+            "metadata": metadata,
+            "created_at": datetime.utcnow(),
+            "updated_at": datetime.utcnow(),
+            "version": 1,
+            "etag": self.token_generator.generate_api_key(16)
+        }
+        
+        if storage_result:
+            document_record.update({
+                "storage_path": storage_result.get("file_path"),
+                "storage_bucket": storage_result.get("bucket"),
+                "storage_key": storage_result.get("key")
+            })
+        
+        # TODO: Implement database save
+        if self.db:
+            # await self.db.save_document(document_record)
+            pass
+            
+        return document_record
     
-    async def _update_document_record(
-        self,
-        document_id: str,
-        updates: Dict[str, Any]
-    ) -> Dict[str, Any]:
-        """Update document record in database"""
-        # TODO: Implement database update
-        return {}  # Placeholder
+    async def _generate_signed_download_url(self, document_id: str, user_id: str, expires_in: int = 3600) -> Optional[str]:
+        """Generate signed download URL for document"""
+        if self.storage:
+            try:
+                # TODO: Implement proper download URL generation based on storage backend
+                # For now, return a placeholder URL
+                return f"/api/documents/{document_id}/download?expires={expires_in}"
+            except Exception as e:
+                self.logger.warning(f"Failed to generate download URL for {document_id}: {str(e)}")
+        return None
     
-    async def _soft_delete(self, document_id: str) -> None:
-        """Mark document as deleted"""
-        # TODO: Implement soft delete
-        pass
-    
-    async def _permanent_delete(self, document_id: str) -> None:
-        """Permanently delete document and all associated data"""
-        # TODO: Implement permanent deletion
-        pass
+    async def _validate_upload_file(self, file_content: bytes, filename: str, content_type: Optional[str]) -> Dict[str, Any]:
+        """Validate uploaded file content and metadata"""
+        validation_result = {"is_valid": True, "errors": [], "warnings": []}
+        
+        if self.validator:
+            # Validate filename
+            if not self.validator.validate_filename(filename):
+                validation_result["is_valid"] = False
+                validation_result["errors"].append("Invalid filename format")
+            
+            # Validate file size
+            if not self.validator.validate_file_size(file_content):
+                validation_result["is_valid"] = False
+                validation_result["errors"].append("File size exceeds limit")
+            
+            # Validate file type
+            file_type_result = self.validator.validate_file_type(file_content, content_type or "", filename)
+            if not file_type_result.get("is_valid", True):
+                validation_result["is_valid"] = False
+                validation_result["errors"].extend(file_type_result.get("errors", []))
+        
+        return validation_result
     
     def get_service_statistics(self) -> Dict[str, Any]:
         """Get service-level statistics"""

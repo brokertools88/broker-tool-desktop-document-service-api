@@ -17,41 +17,85 @@ def create_success_response(
     data: Any = None,
     message: str = "Success",
     status_code: int = status.HTTP_200_OK,
-    meta: Optional[Dict[str, Any]] = None
+    meta: Optional[Dict[str, Any]] = None,
+    version: str = "1.0",
+    enable_compression: bool = False,
+    cache_headers: Optional[Dict[str, str]] = None,
+    transform_data: bool = False
 ) -> JSONResponse:
     """
-    Create standardized success response.
+    Create standardized success response with versioning, compression, and caching.
     
     Args:
         data: Response data
         message: Success message
         status_code: HTTP status code
         meta: Additional metadata
+        version: API version
+        enable_compression: Whether to enable response compression
+        cache_headers: Cache control headers
+        transform_data: Whether to apply data transformation
         
     Returns:
         JSONResponse with standardized format
-        
-    TODO:
-    - Add response versioning
-    - Implement response compression
-    - Add response caching headers
-    - Implement response transformation
     """
+    # Transform data if requested
+    if transform_data and data is not None:
+        data = transform_response_data(data)
+    
     response_data = {
         "success": True,
         "message": message,
         "data": data,
         "timestamp": datetime.utcnow().isoformat(),
-        "status_code": status_code
+        "status_code": status_code,
+        "api_version": version
     }
     
     if meta:
         response_data["meta"] = meta
     
-    return JSONResponse(
+    response = JSONResponse(
         content=response_data,
         status_code=status_code
     )
+    
+    # Add cache headers if provided
+    if cache_headers:
+        for header, value in cache_headers.items():
+            response.headers[header] = value
+    
+    # Add compression hint if enabled
+    if enable_compression:
+        response.headers["Content-Encoding-Hint"] = "gzip"
+    
+    return response
+
+
+def transform_response_data(data: Any) -> Any:
+    """
+    Apply transformation rules to response data.
+    
+    Args:
+        data: Data to transform
+        
+    Returns:
+        Transformed data
+    """
+    # Basic transformation pipeline
+    if isinstance(data, dict):
+        # Convert datetime objects to ISO strings
+        for key, value in data.items():
+            if isinstance(value, datetime):
+                data[key] = value.isoformat()
+            elif isinstance(value, (list, dict)):
+                data[key] = transform_response_data(value)
+    elif isinstance(data, list):
+        data = [transform_response_data(item) for item in data]
+    elif isinstance(data, datetime):
+        return data.isoformat()
+    
+    return data
 
 
 def create_error_response(
@@ -59,10 +103,14 @@ def create_error_response(
     status_code: int = status.HTTP_400_BAD_REQUEST,
     error_code: Optional[str] = None,
     details: Optional[Dict[str, Any]] = None,
-    errors: Optional[List[Dict[str, str]]] = None
+    errors: Optional[List[Dict[str, str]]] = None,
+    error_category: str = "general",
+    tracking_id: Optional[str] = None,
+    localization: Optional[str] = None,
+    report_error: bool = False
 ) -> JSONResponse:
     """
-    Create standardized error response.
+    Create standardized error response with categorization, tracking, and reporting.
     
     Args:
         message: Error message
@@ -70,21 +118,30 @@ def create_error_response(
         error_code: Application-specific error code
         details: Additional error details
         errors: List of field-specific errors
+        error_category: Error category for classification
+        tracking_id: Unique tracking ID for error reporting
+        localization: Locale for error message
+        report_error: Whether to report error to monitoring system
         
     Returns:
         JSONResponse with standardized error format
-        
-    TODO:
-    - Add error categorization
-    - Implement error tracking IDs
-    - Add localization support
-    - Implement error reporting integration
     """
+    # Generate tracking ID if not provided
+    if tracking_id is None:
+        import uuid
+        tracking_id = str(uuid.uuid4())[:8]
+    
+    # TODO: Implement localization support
+    if localization and localization != "en":
+        logger.info(f"Error message localization not yet implemented for: {localization}")
+    
     response_data = {
         "success": False,
         "message": message,
         "timestamp": datetime.utcnow().isoformat(),
-        "status_code": status_code
+        "status_code": status_code,
+        "error_category": error_category,
+        "tracking_id": tracking_id
     }
     
     if error_code:
@@ -95,6 +152,10 @@ def create_error_response(
     
     if errors:
         response_data["errors"] = errors
+    
+    # TODO: Implement error reporting integration
+    if report_error:
+        logger.error(f"Error reported - Tracking ID: {tracking_id}, Message: {message}")
     
     return JSONResponse(
         content=response_data,

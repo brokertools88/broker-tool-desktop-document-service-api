@@ -153,20 +153,35 @@ class AuthClientService:
         - Implement hierarchical permissions
         """
         try:
-            # TODO: Call auth service to get user permissions
-            # For now, implement basic permission checking
-            # This would typically call /api/v1/auth/users/{user_id}/permissions
-            
+            # Call auth service to get user permissions
             url = f"{self.auth_service_url}/api/v1/auth/users/{user_id}/permissions"
-            response = await self.client.get(url)
+            
+            response = await self.client.get(url, timeout=10.0)
             
             if response.status_code == 200:
                 result = response.json()
                 user_permissions = result.get("data", {}).get("permissions", [])
-                return all(perm in user_permissions for perm in required_permissions)
+                
+                # Check if user has all required permissions
+                has_all_permissions = all(perm in user_permissions for perm in required_permissions)
+                
+                logger.info(f"Permission check for user {user_id}: {'granted' if has_all_permissions else 'denied'}")
+                return has_all_permissions
             
+            elif response.status_code == 404:
+                logger.warning(f"User {user_id} not found in auth service")
+                return False
+            
+            else:
+                logger.error(f"Auth service permission check failed: {response.status_code}")
+                return False
+            
+        except httpx.TimeoutException:
+            logger.error("Auth service timeout during permission check")
             return False
-            
+        except httpx.RequestError as e:
+            logger.error(f"Auth service request error during permission check: {str(e)}")
+            return False
         except Exception as e:
             logger.error(f"Permission check failed: {str(e)}")
             return False

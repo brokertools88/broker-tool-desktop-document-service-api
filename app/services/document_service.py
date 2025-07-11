@@ -18,6 +18,7 @@ from app.models import (
     DocumentResponse, DocumentUploadRequest, DocumentUpdateRequest,
     DocumentListResponse, DocumentFilters, DocumentType, DocumentStatus
 )
+from app.core.config import settings
 
 from app.core.exceptions import (
     DocumentNotFoundError, ValidationError, StorageError,
@@ -66,6 +67,7 @@ class DocumentService:
         self._stats = {
             "total_uploads": 0,
             "total_downloads": 0,
+            "total_updates": 0,
             "total_deletes": 0,
             "processing_errors": 0,
             "last_reset": datetime.utcnow()
@@ -110,18 +112,35 @@ class DocumentService:
             
             # Check user quotas and permissions
             if self.auth:
-                # TODO: Implement proper user permission checking
-                user_permissions = {"can_upload": True, "storage_quota_mb": 1000}
-                if not user_permissions.get("can_upload", False):
-                    raise AuthorizationError("User does not have upload permissions")
+                # Check user upload permissions
+                try:
+                    has_upload_permission = await self.auth.check_user_permissions(
+                        user_id, ["document:upload", "document:create"]
+                    )
+                    if not has_upload_permission:
+                        raise AuthorizationError("User does not have upload permissions")
+                    
+                    # Get user information for quota checking
+                    try:
+                        user_info = await self.auth.get_current_user(user_id)
+                        storage_quota_mb = user_info.get("storage_quota_mb", 1000)
+                    except:
+                        storage_quota_mb = 1000
+                    
+                except Exception as e:
+                    self.logger.warning(f"Failed to check user permissions: {str(e)}")
+                    # Fallback to basic permissions
+                    storage_quota_mb = 1000
+            else:
+                storage_quota_mb = 1000
                 
-                # Check storage quota
-                current_usage = await self._get_user_storage_usage(user_id)
-                file_size = len(file_content)
-                quota_limit = user_permissions.get("storage_quota_mb", 1000) * 1024 * 1024
-                
-                if current_usage + file_size > quota_limit:
-                    raise StorageError("Storage quota exceeded")
+            # Check storage quota
+            current_usage = await self._get_user_storage_usage(user_id)
+            file_size = len(file_content)
+            quota_limit = storage_quota_mb * 1024 * 1024
+            
+            if current_usage + file_size > quota_limit:
+                raise StorageError("Storage quota exceeded")
             
             # Store file in storage backend
             storage_result = None
@@ -339,51 +358,156 @@ class DocumentService:
             Document metadata with URLs
         """
         
-        # TODO: Implement document retrieval
-        # TODO: Verify document exists
-        # TODO: Check user access permissions
-        # TODO: Get document metadata from database
-        # TODO: Generate signed URLs if requested
-        # TODO: Return document response
-        
         try:
-            # Check document access
-            # if not await self._check_document_access(document_id, user_id):
-            #     raise AuthorizationError("Access denied to document")
+            # Verify document exists and get metadata from database
+            document_record = await self._get_document_record(document_id)
+            if not document_record:
+                raise DocumentNotFoundError(f"Document {document_id} not found")
             
-            # Get document metadata
-            # document_record = await self._get_document_record(document_id)
+            # Check user access permissions
+            if not await self._check_document_access(document_record, user_id):
+                raise AuthorizationError("Access denied to document")
             
-            # Generate URLs
+            # Generate signed URLs if requested
             download_url = None
             if include_download_url:
-                # download_url = await self.storage.get_download_url(
-                #     document_record["storage_path"], url_expires_in
-                # )
-                download_url = f"/documents/{document_id}/download"  # Placeholder
+                download_url = await self._generate_signed_download_url(
+                    document_id, user_id, url_expires_in
+                )
+            
+            # Update access tracking
+            await self._log_document_access(document_id, user_id, "view")
+            
+            # Update last accessed timestamp
+            await self._update_last_accessed(document_id)
             
             self._stats["total_downloads"] += 1
             
+            # Return document response aligned with DB schema
             return {
-                "id": document_id,
-                "filename": f"document_{document_id}.pdf",  # Placeholder
-                "original_filename": f"original_{document_id}.pdf",
-                "user_id": user_id,
-                "status": "completed",
-                "file_size": 1024000,  # Placeholder
-                "content_type": "application/pdf",
-                "tags": [],
-                "metadata": {},
-                "created_at": datetime.utcnow() - timedelta(hours=1),
-                "updated_at": datetime.utcnow(),
+                "id": document_record["id"],
+                "file_name": document_record["file_name"],
+                "original_filename": document_record["original_filename"],
+                "uploaded_by": document_record["uploaded_by"],
+                "status": document_record["status"],
+                "file_size": document_record["file_size"],
+                "file_type": document_record["file_type"],
+                "mime_type": document_record["mime_type"],
+                "document_type": document_record.get("document_type"),
+                "tags": document_record.get("tags", []),
+                "metadata": document_record.get("metadata", {}),
+                "created_at": document_record["created_at"],
+                "updated_at": document_record["updated_at"],
+                "last_modified": document_record.get("last_modified"),
                 "download_url": download_url,
-                "etag": f'"{datetime.utcnow().timestamp()}"',
-                "ocr_completed": True
+                "etag": document_record.get("etag"),
+                "version": document_record.get("version", 1),
+                "ocr_completed": document_record.get("ocr_completed", False),
+                "ocr_text": document_record.get("ocr_text"),
+                "ocr_confidence": document_record.get("ocr_confidence"),
+                "security_scan_status": document_record.get("security_scan_status"),
+                "virus_scan_status": document_record.get("virus_scan_status"),
+                "download_count": document_record.get("download_count", 0),
+                "last_accessed": document_record.get("last_accessed")
             }
             
+        except (DocumentNotFoundError, AuthorizationError) as e:
+            self.logger.error(f"Document retrieval failed: {str(e)}", extra={"document_id": document_id})
+            raise
         except Exception as e:
-            # TODO: Log error and convert to appropriate exception
-            raise Exception(f"Document retrieval failed: {str(e)}")
+            self.logger.error(f"Unexpected error during document retrieval: {str(e)}", extra={"document_id": document_id})
+            raise DocumentProcessingError(f"Document retrieval failed: {str(e)}")
+
+    async def _get_document_record(self, document_id: str) -> Optional[Dict[str, Any]]:
+        """Get document record from database"""
+        if not self.db:
+            return None
+            
+        try:
+            query = """
+            SELECT 
+                id, file_name, original_filename, uploaded_by, status, file_size,
+                file_type, mime_type, file_path, storage_bucket, storage_key,
+                file_hash, document_type, version, etag, security_scan_status,
+                virus_scan_status, content_validated, ocr_completed, ocr_job_id,
+                ocr_text, ocr_confidence, ocr_language, ocr_page_count, ocr_word_count,
+                download_count, last_accessed, metadata, tags, upload_date,
+                created_at, updated_at, last_modified, deleted_at
+            FROM documents 
+            WHERE id = %(document_id)s AND deleted_at IS NULL
+            """
+            result = await self.db.fetchone(query, {"document_id": document_id})
+            return dict(result) if result else None
+        except Exception as e:
+            self.logger.error(f"Database query failed: {str(e)}")
+            raise DocumentProcessingError(f"Failed to retrieve document: {str(e)}")
+
+    async def _check_document_access(self, document_record: Dict[str, Any], user_id: str) -> bool:
+        """Check if user has access to document"""
+        # Basic ownership check
+        if document_record.get("uploaded_by") == user_id:
+            return True
+        
+        # Check if document is shared with user (could extend this)
+        # For now, only owner has access
+        if self.auth:
+            # Could implement more complex permission checking here
+            user_permissions = await self._get_user_permissions(user_id)
+            if user_permissions.get("admin", False):
+                return True
+        
+        return False
+
+    async def _log_document_access(self, document_id: str, user_id: str, access_type: str):
+        """Log document access for audit trail"""
+        if not self.db:
+            return
+            
+        try:
+            access_log = {
+                "id": str(uuid.uuid4()),
+                "document_id": document_id,
+                "user_id": user_id,
+                "access_type": access_type,
+                "access_method": "api",
+                "success": True,
+                "accessed_at": datetime.utcnow()
+            }
+            
+            query = """
+            INSERT INTO document_access_log (
+                id, document_id, user_id, access_type, access_method, success, accessed_at
+            ) VALUES (
+                %(id)s, %(document_id)s, %(user_id)s, %(access_type)s, 
+                %(access_method)s, %(success)s, %(accessed_at)s
+            )
+            """
+            await self.db.execute(query, access_log)
+        except Exception as e:
+            self.logger.warning(f"Failed to log document access: {str(e)}")
+
+    async def _update_last_accessed(self, document_id: str):
+        """Update document last accessed timestamp"""
+        if not self.db:
+            return
+            
+        try:
+            query = """
+            UPDATE documents 
+            SET last_accessed = %(timestamp)s, updated_at = %(timestamp)s
+            WHERE id = %(document_id)s
+            """
+            await self.db.execute(query, {
+                "document_id": document_id,
+                "timestamp": datetime.utcnow()
+            })
+        except Exception as e:
+            self.logger.warning(f"Failed to update last accessed: {str(e)}")
+
+    async def _get_user_permissions(self, user_id: str) -> Dict[str, Any]:
+        """Get user permissions (placeholder for auth service integration)"""
+        # This would integrate with the auth service
+        return {"admin": False, "can_view": True, "can_download": True}
     
     async def list_documents(
         self,
@@ -411,43 +535,182 @@ class DocumentService:
             Paginated document list
         """
         
-        # TODO: Implement document listing
-        # TODO: Apply user access filters
-        # TODO: Apply search and filter criteria
-        # TODO: Implement cursor-based pagination
-        # TODO: Sort results
-        # TODO: Return paginated response
-        
         try:
-            # Build query filters
-            # query_filters = await self._build_query_filters(user_id, filters)
+            # Apply user access filters - only show documents user owns or has access to
+            base_filters = {"uploaded_by": user_id}
             
-            # Execute paginated query
-            # documents, total_count = await self._execute_paginated_query(
-            #     query_filters, page, page_size, cursor, sort_by, sort_order
-            # )
+            # Apply additional search and filter criteria
+            query_filters = await self._build_query_filters(base_filters, filters)
             
-            # Generate URLs for documents
-            # for doc in documents:
-            #     doc["download_url"] = await self.storage.get_download_url(
-            #         doc["storage_path"]
-            #     )
+            # Implement cursor-based pagination with sorting
+            documents, total_count, next_cursor = await self._execute_paginated_query(
+                query_filters, page, page_size, cursor, sort_by, sort_order
+            )
             
-            # Placeholder response
+            # Generate download URLs for documents
+            for doc in documents:
+                doc["download_url"] = await self._generate_signed_download_url(
+                    doc["id"], user_id, 3600  # 1 hour expiry
+                )
+            
+            # Calculate pagination metadata
+            page_count = (total_count + page_size - 1) // page_size
+            has_more = page < page_count
+            
             return {
-                "items": [],  # TODO: Return actual documents
-                "total_count": 0,
-                "page_count": 0,
+                "items": documents,
+                "total_count": total_count,
+                "page_count": page_count,
                 "current_page": page,
                 "page_size": page_size,
-                "has_more": False,
-                "next_cursor": None,
-                "previous_cursor": None
+                "has_more": has_more,
+                "next_cursor": next_cursor,
+                "previous_cursor": None  # Implement if needed
             }
             
         except Exception as e:
-            # TODO: Log error and convert to appropriate exception
-            raise Exception(f"Document listing failed: {str(e)}")
+            self.logger.error(f"Document listing failed: {str(e)}", extra={"user_id": user_id})
+            raise DocumentProcessingError(f"Document listing failed: {str(e)}")
+
+    async def _build_query_filters(self, base_filters: Dict[str, Any], additional_filters: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        """Build SQL query filters from user criteria"""
+        filters = base_filters.copy()
+        
+        if not additional_filters:
+            return filters
+            
+        # Handle common filter types
+        if "document_type" in additional_filters:
+            filters["document_type"] = additional_filters["document_type"]
+            
+        if "status" in additional_filters:
+            filters["status"] = additional_filters["status"]
+            
+        if "tags" in additional_filters:
+            # PostgreSQL array contains
+            filters["tags_contain"] = additional_filters["tags"]
+            
+        if "file_type" in additional_filters:
+            filters["file_type"] = additional_filters["file_type"]
+            
+        if "created_after" in additional_filters:
+            filters["created_after"] = additional_filters["created_after"]
+            
+        if "created_before" in additional_filters:
+            filters["created_before"] = additional_filters["created_before"]
+            
+        if "search" in additional_filters:
+            # Search in filename and OCR text
+            filters["search_text"] = additional_filters["search"]
+            
+        return filters
+
+    async def _execute_paginated_query(
+        self,
+        filters: Dict[str, Any],
+        page: int,
+        page_size: int,
+        cursor: Optional[str],
+        sort_by: str,
+        sort_order: str
+    ) -> tuple[List[Dict[str, Any]], int, Optional[str]]:
+        """Execute paginated query against documents table"""
+        
+        if not self.db:
+            return [], 0, None
+            
+        try:
+            # Build WHERE clause
+            where_conditions = ["deleted_at IS NULL"]
+            params = {}
+            
+            # Add filters
+            if filters.get("uploaded_by"):
+                where_conditions.append("uploaded_by = %(uploaded_by)s")
+                params["uploaded_by"] = filters["uploaded_by"]
+                
+            if filters.get("document_type"):
+                where_conditions.append("document_type = %(document_type)s")
+                params["document_type"] = filters["document_type"]
+                
+            if filters.get("status"):
+                where_conditions.append("status = %(status)s")
+                params["status"] = filters["status"]
+                
+            if filters.get("file_type"):
+                where_conditions.append("file_type = %(file_type)s")
+                params["file_type"] = filters["file_type"]
+                
+            if filters.get("tags_contain"):
+                where_conditions.append("tags && %(tags)s")  # PostgreSQL array overlap
+                params["tags"] = filters["tags_contain"]
+                
+            if filters.get("created_after"):
+                where_conditions.append("created_at >= %(created_after)s")
+                params["created_after"] = filters["created_after"]
+                
+            if filters.get("created_before"):
+                where_conditions.append("created_at <= %(created_before)s")
+                params["created_before"] = filters["created_before"]
+                
+            if filters.get("search_text"):
+                where_conditions.append(
+                    "(file_name ILIKE %(search)s OR ocr_text ILIKE %(search)s)"
+                )
+                params["search"] = f"%{filters['search_text']}%"
+            
+            # Build ORDER BY clause
+            valid_sort_fields = {
+                "created_at", "updated_at", "file_name", "file_size", 
+                "status", "last_accessed", "download_count"
+            }
+            if sort_by not in valid_sort_fields:
+                sort_by = "created_at"
+            if sort_order.lower() not in ["asc", "desc"]:
+                sort_order = "desc"
+                
+            # Calculate offset for pagination
+            offset = (page - 1) * page_size
+            params["limit"] = page_size
+            params["offset"] = offset
+            
+            # Main query
+            where_clause = " AND ".join(where_conditions)
+            query = f"""
+            SELECT 
+                id, file_name, original_filename, uploaded_by, status, file_size,
+                file_type, mime_type, document_type, version, etag, 
+                ocr_completed, ocr_confidence, security_scan_status, virus_scan_status,
+                download_count, last_accessed, metadata, tags,
+                created_at, updated_at, last_modified
+            FROM documents 
+            WHERE {where_clause}
+            ORDER BY {sort_by} {sort_order.upper()}
+            LIMIT %(limit)s OFFSET %(offset)s
+            """
+            
+            # Count query
+            count_query = f"""
+            SELECT COUNT(*) as total 
+            FROM documents 
+            WHERE {where_clause}
+            """
+            
+            # Execute queries
+            documents_result = await self.db.fetchall(query, params)
+            count_result = await self.db.fetchone(count_query, params)
+            
+            documents = [dict(row) for row in documents_result] if documents_result else []
+            total_count = count_result["total"] if count_result else 0
+            
+            # Generate next cursor (simple implementation)
+            next_cursor = str(page + 1) if (page * page_size) < total_count else None
+            
+            return documents, total_count, next_cursor
+            
+        except Exception as e:
+            self.logger.error(f"Database query failed: {str(e)}")
+            raise DocumentProcessingError(f"Failed to query documents: {str(e)}")
     
     # ============= DOCUMENT MANAGEMENT OPERATIONS =============
     
@@ -471,41 +734,94 @@ class DocumentService:
             Updated document metadata
         """
         
-        # TODO: Implement document update
-        # TODO: Verify document exists and user has access
-        # TODO: Check ETag for optimistic locking
-        # TODO: Validate update data
-        # TODO: Update document metadata
-        # TODO: Log changes for audit trail
-        # TODO: Return updated document
-        
         try:
-            # Check document access
-            # if not await self._check_document_access(document_id, user_id):
-            #     raise AuthorizationError("Access denied to document")
+            # Verify document exists and user has access
+            document = await self._get_document_record(document_id)
+            if not document:
+                raise DocumentProcessingError("Document not found")
+                
+            if not await self._check_document_access(document, user_id):
+                raise DocumentProcessingError("Access denied to document")
             
-            # Check optimistic locking
-            # if if_match:
-            #     current_etag = await self._get_document_etag(document_id)
-            #     if current_etag != if_match:
-            #         raise ConflictError("Document was modified by another request")
+            # Check ETag for optimistic locking
+            if if_match:
+                current_etag = document.get('etag')
+                if current_etag != if_match:
+                    raise DocumentProcessingError("Document was modified by another request (ETag mismatch)")
             
-            # Validate updates
-            # validated_updates = await self.validator.validate_document_updates(updates)
+            # Validate update data
+            validated_updates = await self._validate_document_updates(updates)
             
-            # Apply updates
-            # updated_document = await self._update_document_record(
-            #     document_id, validated_updates
-            # )
+            # Prepare update query with allowed fields only
+            allowed_fields = {
+                'file_name', 'document_type', 'metadata', 'tags', 'status',
+                'last_modified', 'version', 'updated_at'
+            }
             
-            # TODO: Log update event
+            update_fields = {}
+            for field, value in validated_updates.items():
+                if field in allowed_fields:
+                    update_fields[field] = value
             
-            # Return updated document (placeholder)
-            return await self.get_document(document_id, user_id)
+            if not update_fields:
+                raise DocumentProcessingError("No valid fields to update")
             
+            # Add automatic fields
+            update_fields['updated_at'] = datetime.utcnow()
+            update_fields['last_modified'] = datetime.utcnow()
+            update_fields['version'] = document.get('version', 1) + 1
+            
+            # Build dynamic UPDATE query
+            set_clauses = []
+            params = {"document_id": document_id}
+            
+            for field, value in update_fields.items():
+                set_clauses.append(f"{field} = %({field})s")
+                params[field] = value
+            
+            query = f"""
+                UPDATE documents 
+                SET {', '.join(set_clauses)}
+                WHERE id = %(document_id)s AND deleted_at IS NULL
+            """
+            
+            # Execute update
+            if self.db:
+                await self.db.execute(query, params)
+            else:
+                raise DocumentProcessingError("Database connection not available")
+            
+            # Get updated document
+            updated_document = await self._get_document_record(document_id)
+            
+            if not updated_document:
+                raise DocumentProcessingError("Document update failed")
+            
+            # Log update event
+            await self._log_document_access(
+                document_id=document_id,
+                user_id=user_id,
+                access_type="update"
+            )
+            
+            self._stats["total_updates"] += 1
+            
+            return updated_document
+            
+        except DocumentProcessingError:
+            raise
         except Exception as e:
-            # TODO: Log error and convert to appropriate exception
-            raise Exception(f"Document update failed: {str(e)}")
+            # Log error and convert to appropriate exception
+            self.logger.error(f"Document update failed for {document_id}: {str(e)}")
+            
+            # Log failed access
+            await self._log_document_access(
+                document_id=document_id,
+                user_id=user_id,
+                access_type="update"
+            )
+            
+            raise DocumentProcessingError(f"Document update failed: {str(e)}")
     
     async def delete_document(
         self,
@@ -525,36 +841,47 @@ class DocumentService:
             True if deletion successful
         """
         
-        # TODO: Implement document deletion
-        # TODO: Verify document exists and user has access
-        # TODO: Perform soft or hard delete
-        # TODO: Clean up associated data (OCR results, etc.)
-        # TODO: Log deletion event
-        # TODO: Return success status
-        
         try:
-            # Check document access
-            # if not await self._check_document_access(document_id, user_id):
-            #     raise AuthorizationError("Access denied to document")
+            # Verify document exists and user has access
+            document = await self._get_document_record(document_id)
+            if not document:
+                raise DocumentProcessingError("Document not found")
+                
+            if not await self._check_document_access(document, user_id):
+                raise DocumentProcessingError("Access denied to document")
             
             if permanent:
                 # Hard delete - remove all data
-                # await self._permanent_delete(document_id)
-                pass
+                await self._permanent_delete(document_id)
             else:
                 # Soft delete - mark as deleted
-                # await self._soft_delete(document_id)
-                pass
+                await self._soft_delete(document_id)
             
             self._stats["total_deletes"] += 1
             
-            # TODO: Log deletion event
+            # Log deletion event
+            await self._log_document_access(
+                document_id=document_id,
+                user_id=user_id,
+                access_type="delete"
+            )
             
             return True
             
+        except DocumentProcessingError:
+            raise
         except Exception as e:
-            # TODO: Log error and convert to appropriate exception
-            raise Exception(f"Document deletion failed: {str(e)}")
+            # Log error and convert to appropriate exception
+            self.logger.error(f"Document deletion failed for {document_id}: {str(e)}")
+            
+            # Log failed access
+            await self._log_document_access(
+                document_id=document_id,
+                user_id=user_id,
+                access_type="delete"
+            )
+            
+            raise DocumentProcessingError(f"Document deletion failed: {str(e)}")
     
     # ============= DOCUMENT DOWNLOAD OPERATIONS =============
     
@@ -574,35 +901,63 @@ class DocumentService:
             Document file content
         """
         
-        # TODO: Implement document download
-        # TODO: Verify document exists and user has access
-        # TODO: Get file content from storage
-        # TODO: Log download event
-        # TODO: Return file content
-        
         try:
-            # Check document access
-            # if not await self._check_document_access(document_id, user_id):
-            #     raise AuthorizationError("Access denied to document")
+            # Verify document exists and user has access
+            document = await self._get_document_record(document_id)
+            if not document:
+                raise DocumentProcessingError("Document not found")
+                
+            if not await self._check_document_access(document, user_id):
+                raise DocumentProcessingError("Access denied to document")
             
-            # Get document record
-            # document_record = await self._get_document_record(document_id)
+            # Get file content from storage
+            if self.storage and document.get("storage_key"):
+                try:
+                    # Use storage service to download file content
+                    download_result = await self.storage.download_file(document_id, user_id)
+                    if "content" in download_result:
+                        file_content = download_result["content"]
+                    else:
+                        raise DocumentProcessingError("File content not available in download result")
+                except Exception as storage_error:
+                    raise DocumentProcessingError(f"File retrieval failed: {str(storage_error)}")
+            else:
+                # Fallback to file path if storage service unavailable
+                file_path = document.get("file_path")
+                if file_path and Path(file_path).exists():
+                    with open(file_path, "rb") as f:
+                        file_content = f.read()
+                else:
+                    raise DocumentProcessingError("File not found in storage")
             
-            # Download file content
-            # file_content = await self.storage.get_file_content(
-            #     document_record["storage_path"]
-            # )
+            # Update download statistics
+            await self._update_download_stats(document_id)
             
             self._stats["total_downloads"] += 1
             
-            # TODO: Log download event
+            # Log download event
+            await self._log_document_access(
+                document_id=document_id,
+                user_id=user_id,
+                access_type="download"
+            )
             
-            # Placeholder return
-            return b"Placeholder document content"
+            return file_content
             
+        except DocumentProcessingError:
+            raise
         except Exception as e:
-            # TODO: Log error and convert to appropriate exception
-            raise Exception(f"Document download failed: {str(e)}")
+            # Log error and convert to appropriate exception
+            self.logger.error(f"Document download failed for {document_id}: {str(e)}")
+            
+            # Log failed access
+            await self._log_document_access(
+                document_id=document_id,
+                user_id=user_id,
+                access_type="download"
+            )
+            
+            raise DocumentProcessingError(f"Document download failed: {str(e)}")
     
     # ============= DOCUMENT STATISTICS =============
     
@@ -617,40 +972,133 @@ class DocumentService:
             Document statistics and usage information
         """
         
-        # TODO: Calculate document statistics
-        # TODO: Get storage usage
-        # TODO: Count documents by status
-        # TODO: Calculate processing metrics
-        # TODO: Return statistics
-        
-        return {
-            "total_documents": 0,
-            "total_storage_mb": 0,
-            "documents_by_type": {},
-            "documents_by_status": {},
-            "ocr_completed": 0,
-            "processing_queue": 0,
-            "upload_count_today": 0,
-            "download_count_today": 0,
-            "storage_quota_mb": 1000,
-            "storage_used_percent": 0.0
-        }
+        try:
+            if not self.db:
+                # Return basic statistics without database
+                return {
+                    "total_documents": 0,
+                    "total_storage_mb": 0,
+                    "documents_by_type": {},
+                    "documents_by_status": {},
+                    "ocr_completed": 0,
+                    "processing_queue": 0,
+                    "upload_count_today": 0,
+                    "download_count_today": 0,
+                    "storage_quota_mb": getattr(settings, 'DEFAULT_STORAGE_QUOTA_MB', 1000),
+                    "storage_used_percent": 0.0
+                }
+            
+            # Calculate document statistics
+            stats_query = """
+            SELECT 
+                COUNT(*) as total_documents,
+                SUM(file_size) as total_storage_bytes,
+                COUNT(CASE WHEN ocr_completed = true THEN 1 END) as ocr_completed_count
+            FROM documents 
+            WHERE uploaded_by = %(user_id)s AND deleted_at IS NULL
+            """
+            stats_result = await self.db.fetchrow(stats_query, {"user_id": user_id})
+            
+            # Count documents by status
+            status_query = """
+            SELECT status, COUNT(*) as count
+            FROM documents 
+            WHERE uploaded_by = %(user_id)s AND deleted_at IS NULL
+            GROUP BY status
+            """
+            status_results = await self.db.fetch(status_query, {"user_id": user_id})
+            
+            # Count documents by type
+            type_query = """
+            SELECT document_type, COUNT(*) as count
+            FROM documents 
+            WHERE uploaded_by = %(user_id)s AND deleted_at IS NULL AND document_type IS NOT NULL
+            GROUP BY document_type
+            """
+            type_results = await self.db.fetch(type_query, {"user_id": user_id})
+            
+            # Get today's upload count
+            today_upload_query = """
+            SELECT COUNT(*) as upload_count
+            FROM documents 
+            WHERE uploaded_by = %(user_id)s 
+            AND created_at >= CURRENT_DATE 
+            AND deleted_at IS NULL
+            """
+            today_upload_result = await self.db.fetchrow(today_upload_query, {"user_id": user_id})
+            
+            # Get today's download count from access log
+            today_download_query = """
+            SELECT COUNT(*) as download_count
+            FROM document_access_log dal
+            JOIN documents d ON dal.document_id = d.id
+            WHERE d.uploaded_by = %(user_id)s 
+            AND dal.access_type = 'download'
+            AND dal.accessed_at >= CURRENT_DATE
+            AND dal.success = true
+            """
+            today_download_result = await self.db.fetchrow(today_download_query, {"user_id": user_id})
+            
+            # Calculate processing metrics
+            total_storage_bytes = stats_result['total_storage_bytes'] or 0
+            total_storage_mb = total_storage_bytes / (1024 * 1024)
+            storage_quota_mb = getattr(settings, 'DEFAULT_STORAGE_QUOTA_MB', 1000)
+            storage_used_percent = (total_storage_mb / storage_quota_mb * 100) if storage_quota_mb > 0 else 0.0
+            
+            # Format results
+            documents_by_status = {row['status']: row['count'] for row in status_results}
+            documents_by_type = {row['document_type']: row['count'] for row in type_results}
+            
+            return {
+                "total_documents": stats_result['total_documents'] or 0,
+                "total_storage_mb": round(total_storage_mb, 2),
+                "documents_by_type": documents_by_type,
+                "documents_by_status": documents_by_status,
+                "ocr_completed": stats_result['ocr_completed_count'] or 0,
+                "processing_queue": documents_by_status.get('processing', 0),
+                "upload_count_today": today_upload_result['upload_count'] or 0,
+                "download_count_today": today_download_result['download_count'] or 0,
+                "storage_quota_mb": storage_quota_mb,
+                "storage_used_percent": round(storage_used_percent, 2),
+                "last_calculated": datetime.utcnow().isoformat()
+            }
+            
+        except Exception as e:
+            self.logger.error(f"Failed to calculate document statistics for user {user_id}: {str(e)}")
+            # Return safe fallback statistics
+            return {
+                "total_documents": 0,
+                "total_storage_mb": 0,
+                "documents_by_type": {},
+                "documents_by_status": {},
+                "ocr_completed": 0,
+                "processing_queue": 0,
+                "upload_count_today": 0,
+                "download_count_today": 0,
+                "storage_quota_mb": getattr(settings, 'DEFAULT_STORAGE_QUOTA_MB', 1000),
+                "storage_used_percent": 0.0,
+                "error": "Statistics calculation failed"
+            }
     
     # ============= HELPER METHODS =============
     
-    async def _check_document_access(self, document_id: str, user_id: str) -> bool:
-        """Check if user has access to document"""
-        # TODO: Implement access control logic
-        return True  # Placeholder
-    
-    async def _get_document_record(self, document_id: str) -> Dict[str, Any]:
-        """Get document record from database"""
-        # TODO: Implement database query
-        return {}  # Placeholder
-    
     async def _get_user_storage_usage(self, user_id: str) -> int:
         """Get current storage usage for user in bytes"""
-        # TODO: Implement database query to calculate user storage usage
+        if not self.db:
+            return 0
+            
+        try:
+            query = """
+            SELECT COALESCE(SUM(file_size), 0) as total_storage_bytes
+            FROM documents 
+            WHERE uploaded_by = %(user_id)s AND deleted_at IS NULL
+            """
+            result = await self.db.fetchrow(query, {"user_id": user_id})
+            return int(result['total_storage_bytes']) if result else 0
+            
+        except Exception as e:
+            self.logger.error(f"Failed to get storage usage for user {user_id}: {str(e)}")
+            return 0
         if self.db:
             # Placeholder for database query
             # result = await self.db.execute(
@@ -674,44 +1122,156 @@ class DocumentService:
         """Save document metadata to database"""
         document_record = {
             "id": document_id,
-            "filename": filename,
-            "original_filename": filename,
-            "user_id": user_id,
+            "file_name": filename,  # Updated to match DB schema
+            "original_filename": filename,  # Updated to match DB schema
+            "uploaded_by": user_id,  # Updated to match DB schema
             "status": DocumentStatus.UPLOADED.value,
             "file_size": file_size,
-            "content_type": content_type or "application/octet-stream",
-            "tags": tags,
+            "file_type": Path(filename).suffix.lower().lstrip('.') or 'unknown',  # Extract file extension
+            "mime_type": content_type or "application/octet-stream",
+            "file_path": storage_result.get("file_path") if storage_result else f"/temp/{document_id}",
+            "storage_bucket": storage_result.get("bucket") if storage_result else "documents",
+            "storage_key": storage_result.get("key") if storage_result else f"documents/{document_id}/{filename}",
+            "file_hash": None,  # Will be auto-generated by DB trigger
+            "document_type": self._detect_document_type(filename, content_type),
+            "version": 1,
+            "etag": None,  # Will be auto-generated by DB trigger
+            "security_scan_status": "pending",
+            "virus_scan_status": "pending",
+            "content_validated": False,
+            "ocr_completed": False,
+            "ocr_job_id": None,
+            "ocr_text": None,
+            "ocr_confidence": None,
+            "ocr_language": None,
+            "ocr_page_count": None,
+            "ocr_word_count": None,
+            "upload_url": None,
+            "download_url": None,
+            "thumbnail_url": None,
+            "url_expires_at": None,
+            "download_count": 0,
+            "last_accessed": None,
             "metadata": metadata,
+            "tags": tags,
+            "upload_date": datetime.utcnow(),
             "created_at": datetime.utcnow(),
             "updated_at": datetime.utcnow(),
-            "version": 1,
-            "etag": self.token_generator.generate_api_key(16)
+            "last_modified": datetime.utcnow(),
+            "deleted_at": None
         }
         
-        if storage_result:
-            document_record.update({
-                "storage_path": storage_result.get("file_path"),
-                "storage_bucket": storage_result.get("bucket"),
-                "storage_key": storage_result.get("key")
-            })
-        
-        # TODO: Implement database save
+        # Save to database if available
         if self.db:
-            # await self.db.save_document(document_record)
-            pass
+            try:
+                # Using raw SQL aligned with our unified schema
+                query = """
+                INSERT INTO documents (
+                    id, file_name, original_filename, file_size, file_type, mime_type,
+                    file_path, storage_bucket, storage_key, document_type, status,
+                    uploaded_by, version, metadata, tags, created_at, updated_at
+                ) VALUES (
+                    %(id)s, %(file_name)s, %(original_filename)s, %(file_size)s, %(file_type)s, %(mime_type)s,
+                    %(file_path)s, %(storage_bucket)s, %(storage_key)s, %(document_type)s, %(status)s,
+                    %(uploaded_by)s, %(version)s, %(metadata)s, %(tags)s, %(created_at)s, %(updated_at)s
+                ) RETURNING id, storage_key, file_hash, etag
+                """
+                result = await self.db.execute(query, document_record)
+                # Update record with auto-generated values
+                if result:
+                    document_record.update({
+                        "storage_key": result.get("storage_key"),
+                        "file_hash": result.get("file_hash"),
+                        "etag": result.get("etag")
+                    })
+            except Exception as e:
+                self.logger.error(f"Failed to save document metadata: {str(e)}")
+                raise DocumentProcessingError(f"Database save failed: {str(e)}")
             
         return document_record
+
+    def _detect_document_type(self, filename: str, content_type: Optional[str]) -> Optional[str]:
+        """Detect document type based on filename and content type"""
+        # Extract file extension
+        ext = Path(filename).suffix.lower().lstrip('.')
+        
+        # Map extensions to document types
+        document_type_mapping = {
+            'pdf': 'policy_document',
+            'jpg': 'image_document', 
+            'jpeg': 'image_document',
+            'png': 'image_document',
+            'tiff': 'image_document',
+            'tif': 'image_document',
+            'doc': 'text_document',
+            'docx': 'text_document',
+            'txt': 'text_document'
+        }
+        
+        # Check content type patterns
+        if content_type:
+            if 'pdf' in content_type:
+                return 'policy_document'
+            elif 'image' in content_type:
+                return 'image_document'
+            elif 'text' in content_type or 'document' in content_type:
+                return 'text_document'
+        
+        return document_type_mapping.get(ext, 'unknown_document')
     
     async def _generate_signed_download_url(self, document_id: str, user_id: str, expires_in: int = 3600) -> Optional[str]:
         """Generate signed download URL for document"""
         if self.storage:
             try:
-                # TODO: Implement proper download URL generation based on storage backend
-                # For now, return a placeholder URL
-                return f"/api/documents/{document_id}/download?expires={expires_in}"
+                # Get document record to determine storage backend
+                document = await self._get_document_record(document_id)
+                if not document:
+                    return None
+                
+                # Check if user has access
+                if not await self._check_document_access(document, user_id):
+                    return None
+                
+                storage_key = document.get('storage_key')
+                storage_bucket = document.get('storage_bucket', 'documents')
+                
+                if storage_key:
+                    # Generate signed URL via storage service
+                    # This would typically call storage service's generate_presigned_url method
+                    expiry_time = datetime.utcnow() + timedelta(seconds=expires_in)
+                    
+                    # For S3-like storage, this would generate a presigned URL
+                    # For local storage, this would be a time-limited token URL
+                    signed_url = f"/api/v1/documents/{document_id}/download"
+                    
+                    # Add query parameters for validation
+                    signed_url += f"?expires={int(expiry_time.timestamp())}"
+                    signed_url += f"&user_id={user_id}"
+                    signed_url += f"&signature={self._generate_url_signature(document_id, user_id, expiry_time)}"
+                    
+                    return signed_url
+                    
             except Exception as e:
                 self.logger.warning(f"Failed to generate download URL for {document_id}: {str(e)}")
-        return None
+        
+        # Fallback to direct download endpoint
+        return f"/api/v1/documents/{document_id}/download"
+    
+    def _generate_url_signature(self, document_id: str, user_id: str, expiry_time: datetime) -> str:
+        """Generate URL signature for download authentication"""
+        import hashlib
+        import hmac
+        
+        # Use a secret key from settings or environment
+        secret_key = getattr(settings, 'SECRET_KEY', 'fallback-secret-key').encode('utf-8')
+        
+        # Create signature payload
+        payload = f"{document_id}:{user_id}:{int(expiry_time.timestamp())}"
+        
+        # Generate HMAC signature
+        signature = hmac.new(secret_key, payload.encode('utf-8'), hashlib.sha256).hexdigest()
+        
+        return signature[:16]  # Truncate for URL brevity
     
     async def _validate_upload_file(self, file_content: bytes, filename: str, content_type: Optional[str]) -> Dict[str, Any]:
         """Validate uploaded file content and metadata"""
@@ -736,6 +1296,39 @@ class DocumentService:
         
         return validation_result
     
+    async def _validate_document_updates(self, updates: Dict[str, Any]) -> Dict[str, Any]:
+        """Validate document update data"""
+        validated = {}
+        
+        if "file_name" in updates:
+            filename = updates["file_name"]
+            if not filename or not isinstance(filename, str):
+                raise DocumentProcessingError("Invalid filename")
+            validated["file_name"] = filename.strip()
+        
+        if "document_type" in updates:
+            doc_type = updates["document_type"]
+            if doc_type is not None:
+                validated["document_type"] = str(doc_type)
+        
+        if "metadata" in updates:
+            metadata = updates["metadata"]
+            if metadata is not None and isinstance(metadata, dict):
+                validated["metadata"] = metadata
+        
+        if "tags" in updates:
+            tags = updates["tags"]
+            if tags is not None and isinstance(tags, list):
+                validated["tags"] = [str(tag) for tag in tags]
+        
+        if "status" in updates:
+            status = updates["status"]
+            allowed_statuses = {'active', 'uploaded', 'processing', 'completed', 'failed', 'deleted'}
+            if status in allowed_statuses:
+                validated["status"] = status
+        
+        return validated
+
     def get_service_statistics(self) -> Dict[str, Any]:
         """Get service-level statistics"""
         return self._stats.copy()
@@ -747,3 +1340,67 @@ class DocumentService:
 # TODO: Add document workflow automation
 # TODO: Add document analytics
 # TODO: Add document backup and restore
+
+    async def _soft_delete(self, document_id: str) -> None:
+        """Perform soft delete by setting deleted_at timestamp"""
+        if not self.db:
+            raise DocumentProcessingError("Database connection not available")
+            
+        try:
+            query = """
+            UPDATE documents 
+            SET deleted_at = %(deleted_at)s, updated_at = %(updated_at)s
+            WHERE id = %(document_id)s AND deleted_at IS NULL
+            """
+            timestamp = datetime.utcnow()
+            await self.db.execute(query, {
+                "document_id": document_id,
+                "deleted_at": timestamp,
+                "updated_at": timestamp
+            })
+        except Exception as e:
+            raise DocumentProcessingError(f"Soft delete failed: {str(e)}")
+    
+    async def _permanent_delete(self, document_id: str) -> None:
+        """Perform permanent delete - removes all document data"""
+        if not self.db:
+            raise DocumentProcessingError("Database connection not available")
+            
+        try:
+            # First clean up associated OCR jobs
+            ocr_cleanup_query = """
+            DELETE FROM ocr_jobs WHERE document_id = %(document_id)s
+            """
+            await self.db.execute(ocr_cleanup_query, {"document_id": document_id})
+            
+            # Then delete document record
+            document_query = """
+            DELETE FROM documents WHERE id = %(document_id)s
+            """
+            await self.db.execute(document_query, {"document_id": document_id})
+            
+            # Note: document_access_log entries are kept for audit purposes
+            # They will be cleaned up by scheduled maintenance
+            
+        except Exception as e:
+            raise DocumentProcessingError(f"Permanent delete failed: {str(e)}")
+
+    async def _update_download_stats(self, document_id: str) -> None:
+        """Update document download statistics"""
+        if not self.db:
+            return
+            
+        try:
+            query = """
+            UPDATE documents 
+            SET download_count = download_count + 1, 
+                last_accessed = %(timestamp)s, 
+                updated_at = %(timestamp)s
+            WHERE id = %(document_id)s AND deleted_at IS NULL
+            """
+            await self.db.execute(query, {
+                "document_id": document_id,
+                "timestamp": datetime.utcnow()
+            })
+        except Exception as e:
+            self.logger.warning(f"Failed to update download stats: {str(e)}")

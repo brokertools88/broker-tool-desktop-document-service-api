@@ -31,7 +31,8 @@ class DocumentType(str, Enum):
 
 
 class DocumentStatus(str, Enum):
-    """Document processing status"""
+    """Document processing status aligned with unified schema"""
+    ACTIVE = "active"
     UPLOADED = "uploaded"
     PROCESSING = "processing"
     COMPLETED = "completed"
@@ -213,36 +214,70 @@ class DocumentFilters(BaseAPIModel):
 # ============= RESPONSE MODELS =============
 
 class DocumentResponse(BaseAPIModel):
-    """Document response schema"""
+    """Document response schema aligned with unified database schema"""
+    # Primary Key
     id: uuid.UUID = Field(description="Unique document identifier")
-    filename: str = Field(description="Document filename")
-    original_filename: str = Field(description="Original uploaded filename")
-    document_type: DocumentType = Field(description="Document file type")
-    status: DocumentStatus = Field(description="Document processing status")
+    
+    # File Identification
+    file_name: str = Field(description="Current filename (may be sanitized)")
+    original_filename: str = Field(description="User's original filename as uploaded")
     file_size: int = Field(description="File size in bytes")
-    mime_type: str = Field(description="MIME type of the document")
+    file_type: str = Field(description="File extension/type")
+    mime_type: Optional[str] = Field(None, description="Proper MIME type")
+    file_path: str = Field(description="Current file path in storage")
     
-    # URLs
-    upload_url: Optional[str] = Field(None, description="Signed upload URL")
-    download_url: Optional[str] = Field(None, description="Signed download URL")
-    thumbnail_url: Optional[str] = Field(None, description="Document thumbnail URL")
+    # Storage Backend
+    storage_bucket: Optional[str] = Field(None, description="S3/storage bucket name")
+    storage_key: Optional[str] = Field(None, description="Unique storage identifier")
+    file_hash: Optional[str] = Field(None, description="SHA-256 for deduplication")
     
-    # Metadata
-    metadata: Optional[Dict[str, Any]] = Field(None, description="Document metadata")
-    tags: List[str] = Field(default_factory=list, description="Document tags")
+    # Document Classification
+    document_type: Optional[str] = Field(None, description="Business document type")
+    status: DocumentStatus = Field(description="Document status")
     
-    # Ownership and timestamps
-    user_id: str = Field(description="Owner user ID")
-    created_at: datetime = Field(description="Creation timestamp")
-    updated_at: datetime = Field(description="Last update timestamp")
+    # Ownership & Access
+    uploaded_by: Optional[str] = Field(None, description="Username/ID of uploader")
+    client_id: Optional[uuid.UUID] = Field(None, description="Associated client")
+    insurer_id: Optional[uuid.UUID] = Field(None, description="Associated insurer")
     
-    # Versioning and caching
-    etag: str = Field(description="Entity tag for caching")
-    version: int = Field(default=1, description="Document version")
+    # Versioning & Caching
+    version: int = Field(default=1, description="Document version number")
+    etag: Optional[str] = Field(None, description="Entity tag for caching")
     
-    # OCR status
-    ocr_completed: bool = Field(default=False, description="OCR processing completed")
-    ocr_job_id: Optional[uuid.UUID] = Field(None, description="Associated OCR job ID")
+    # Security & Validation
+    security_scan_status: str = Field(default="pending", description="Security scan result")
+    virus_scan_status: str = Field(default="pending", description="Virus scan result")
+    content_validated: bool = Field(default=False, description="Content validation flag")
+    
+    # OCR Integration
+    ocr_completed: bool = Field(default=False, description="OCR processing status")
+    ocr_job_id: Optional[uuid.UUID] = Field(None, description="Reference to OCR job")
+    ocr_text: Optional[str] = Field(None, description="Extracted text content")
+    ocr_confidence: Optional[float] = Field(None, description="OCR confidence score (0-1)")
+    ocr_language: Optional[str] = Field(None, description="Detected language")
+    ocr_page_count: Optional[int] = Field(None, description="Number of pages processed")
+    ocr_word_count: Optional[int] = Field(None, description="Word count in extracted text")
+    
+    # URL Management
+    upload_url: Optional[str] = Field(None, description="Temporary upload URL")
+    download_url: Optional[str] = Field(None, description="Temporary download URL")
+    thumbnail_url: Optional[str] = Field(None, description="Thumbnail/preview URL")
+    url_expires_at: Optional[datetime] = Field(None, description="URL expiration time")
+    
+    # Usage Tracking
+    download_count: int = Field(default=0, description="Number of downloads")
+    last_accessed: Optional[datetime] = Field(None, description="Last access timestamp")
+    
+    # Metadata & Tags
+    metadata: Dict[str, Any] = Field(default_factory=dict, description="Flexible document metadata")
+    tags: List[str] = Field(default_factory=list, description="Document tags/categories")
+    
+    # Timestamps
+    upload_date: Optional[datetime] = Field(None, description="Upload timestamp (legacy)")
+    created_at: Optional[datetime] = Field(None, description="Record creation time")
+    updated_at: Optional[datetime] = Field(None, description="Last update time")
+    last_modified: Optional[datetime] = Field(None, description="Last modification time")
+    deleted_at: Optional[datetime] = Field(None, description="Soft delete timestamp")
     
     # TODO: Add computed fields
     # TODO: Add URL generation methods
@@ -284,36 +319,75 @@ class OCRResultResponse(BaseAPIModel):
 
 
 class OCRJobResponse(BaseAPIModel):
-    """OCR job status response"""
-    job_id: uuid.UUID = Field(description="Unique job identifier")
-    document_id: uuid.UUID = Field(description="Source document ID")
-    status: OCRJobStatus = Field(description="Current job status")
-    progress_percentage: Optional[float] = Field(
-        None,
-        ge=0.0,
-        le=100.0,
-        description="Processing progress (0-100%)"
-    )
-    estimated_completion: Optional[datetime] = Field(
-        None,
-        description="Estimated completion time"
-    )
+    """OCR job response schema aligned with unified database schema"""
+    # Primary Key
+    id: uuid.UUID = Field(description="Unique job identifier")
+    
+    # Job Reference
+    document_id: uuid.UUID = Field(description="Reference to documents.id")
+    
+    # Job Configuration
+    status: OCRJobStatus = Field(description="Job processing status")
+    priority: int = Field(default=5, description="Job priority (1-10, 1=highest)")
+    language: str = Field(default="auto", description="OCR language hint")
+    engine: str = Field(default="mistral", description="OCR engine to use")
+    options: Dict[str, Any] = Field(default_factory=dict, description="Engine-specific options")
+    
+    # Processing Results
+    result: Optional[Dict[str, Any]] = Field(None, description="Full OCR result data")
+    extracted_text: Optional[str] = Field(None, description="Plain text content")
+    confidence_score: Optional[float] = Field(None, description="Overall confidence (0-1)")
+    page_count: Optional[int] = Field(None, description="Pages processed")
+    word_count: Optional[int] = Field(None, description="Words extracted")
+    character_count: Optional[int] = Field(None, description="Characters extracted")
+    
+    # Error Handling
+    error_message: Optional[str] = Field(None, description="Error description")
+    retry_count: int = Field(default=0, description="Current retry attempt")
+    max_retries: int = Field(default=3, description="Maximum retry attempts")
+    
+    # Timestamps
+    processing_started_at: Optional[datetime] = Field(None, description="When processing began")
+    processing_completed_at: Optional[datetime] = Field(None, description="When processing finished")
     created_at: datetime = Field(description="Job creation time")
-    error_message: Optional[str] = Field(None, description="Error details if failed")
-    
-    # TODO: Add queue position
-    # TODO: Add resource usage metrics
+    updated_at: datetime = Field(description="Last update time")
 
 
-class BatchOCRResponse(BaseAPIModel):
-    """Batch OCR processing response"""
-    batch_id: uuid.UUID = Field(description="Batch processing ID")
-    document_count: int = Field(description="Total documents in batch")
-    jobs: List[OCRJobResponse] = Field(description="Individual job details")
-    created_at: datetime = Field(description="Batch creation time")
+class DocumentAccessLogResponse(BaseAPIModel):
+    """Document access log response schema aligned with unified database schema"""
+    # Primary Key
+    id: uuid.UUID = Field(description="Unique log entry ID")
     
-    # TODO: Add batch progress tracking
-    # TODO: Add estimated completion time
+    # References
+    document_id: uuid.UUID = Field(description="Reference to documents.id")
+    user_id: str = Field(description="User performing action")
+    
+    # Access Details
+    access_type: str = Field(description="Type of operation")
+    access_method: Optional[str] = Field(None, description="How access was made")
+    
+    # Request Context
+    ip_address: Optional[str] = Field(None, description="Client IP address")
+    user_agent: Optional[str] = Field(None, description="Client user agent")
+    request_id: Optional[str] = Field(None, description="Request tracing ID")
+    session_id: Optional[str] = Field(None, description="User session ID")
+    
+    # Response Details
+    success: bool = Field(default=True, description="Operation success flag")
+    http_status_code: Optional[int] = Field(None, description="HTTP response code")
+    error_message: Optional[str] = Field(None, description="Error description")
+    error_code: Optional[str] = Field(None, description="Error code")
+    
+    # Performance Metrics
+    response_time_ms: Optional[int] = Field(None, description="Response time in milliseconds")
+    file_size_downloaded: Optional[int] = Field(None, description="Bytes downloaded")
+    
+    # Geolocation
+    country_code: Optional[str] = Field(None, description="Country code (optional)")
+    region: Optional[str] = Field(None, description="Region/state (optional)")
+    
+    # Timestamp
+    accessed_at: datetime = Field(description="When access occurred")
 
 
 class DocumentListResponse(BaseAPIModel):
